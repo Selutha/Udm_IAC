@@ -7,7 +7,7 @@ import urllib3
 # Suppress insecure HTTPS warnings (self-signed cert on UDM)
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-_DEFAULT_ENV_PATH = os.path.join(os.path.dirname(__file__), "..", "context", "ui_api_key.env")
+_DEFAULT_ENV_PATH = os.path.join(os.path.dirname(__file__), ".env")
 
 # Path prefix shared by all integration v1 endpoints
 _API_ROOT = "/proxy/network/integration/v1"
@@ -16,7 +16,7 @@ _API_ROOT = "/proxy/network/integration/v1"
 def load_env(env_path=None):
     """Load .env file variables into os.environ.
 
-    Defaults to ../context/ui_api_key.env relative to this script.
+    Defaults to .env in the repo root.
     Only sets variables that are not already present in the environment
     (os.environ.setdefault), so shell exports take precedence.
     """

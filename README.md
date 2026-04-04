@@ -19,10 +19,10 @@ Python handles diffing and playbook generation. Ansible (via the official
 - Python 3.12+
 - Ansible with the `ubiquiti.unifi_api` collection installed
 - A UI API key generated on the UDM Pro (Settings > API)
-- The `.env` file at `../context/ui_api_key.env` with:
-  ```
-  UDM_HOST=https://192.168.0.1
-  UI_API_KEY=your_api_key_here
+- A `.env` file in the repo root:
+  ```bash
+  cp .env.example .env
+  # edit .env with your API key
   ```
 
 ### Install dependencies
