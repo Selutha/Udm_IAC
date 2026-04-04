@@ -1,0 +1,194 @@
+udm:
+  host: "https://192.168.0.1"
+  site_id: "default"
+
+# Zones managed by this config.
+#
+# system: true  → zone was created by UniFi (SYSTEM_DEFINED); we do not
+#                 create or delete it, only manage its network assignments.
+# networks:     → list of network names that should be assigned to this zone.
+#
+# Zones absent from this file are left untouched on the UDM.
+zones:
+  Internal:
+    system: true
+    networks: [infrastructure]
+
+  Hotspot:
+    system: true
+    networks: [Guests]
+
+  Dmz:
+    system: true
+    networks: []
+
+  Server:
+    networks: [server]
+
+  Admin:
+    networks: [admin]
+
+  Family:
+    networks: [Debra]
+
+  Kids:
+    networks: [Children]
+
+  IOT:
+    networks: [Trusted IOT]
+
+  Rental:
+    networks: [Rental]
+
+policies:
+  # index_base: first index value assigned to the first rule in the list.
+  # index_step: increment between consecutive rules.
+  # The diff engine computes: index = index_base + (position * index_step)
+  index_base: 10000
+  index_step: 1
+
+  rules:
+    # ------------------------------------------------------------------
+    # Admin allow-all policies
+    # Admin has unrestricted access to every other zone so that the
+    # management VLAN can always reach all services regardless of other
+    # firewall rules. These are the last line of defense against lockout.
+    # ------------------------------------------------------------------
+
+    - name: "Admin Allow All to Internal"
+      action: allow
+      source: Admin
+      destination: Internal
+      protocol: all
+
+    - name: "Admin Allow All to Hotspot"
+      action: allow
+      source: Admin
+      destination: Hotspot
+      protocol: all
+
+    - name: "Admin Allow All to Dmz"
+      action: allow
+      source: Admin
+      destination: Dmz
+      protocol: all
+
+    - name: "Admin Allow All to Rental"
+      action: allow
+      source: Admin
+      destination: Rental
+      protocol: all
+
+    - name: "Admin Allow All to Family"
+      action: allow
+      source: Admin
+      destination: Family
+      protocol: all
+
+    - name: "Admin Allow All to Kids"
+      action: allow
+      source: Admin
+      destination: Kids
+      protocol: all
+
+    - name: "Admin Allow All to IOT"
+      action: allow
+      source: Admin
+      destination: IOT
+      protocol: all
+
+    - name: "Admin Allow All to Server"
+      action: allow
+      source: Admin
+      destination: Server
+      protocol: all
+
+    # ------------------------------------------------------------------
+    # Family zone — selective access to services on Server and IOT
+    # ------------------------------------------------------------------
+
+    - name: "Family Allow Plex"
+      action: allow
+      source: Family
+      destination: Server
+      protocol: tcp
+      destination_port: "32400"
+
+    - name: "Family Allow Plex Discovery"
+      action: allow
+      source: Family
+      destination: Server
+      protocol: udp
+      destination_port: "32410,32412,32413,32414"
+
+    - name: "Family Allow Printing"
+      action: allow
+      source: Family
+      destination: Server
+      protocol: tcp
+      destination_port: "515,631,9100"
+
+    # AirPlay uses both TCP and UDP; tcp_udp maps to the PRESET filter
+    # in the UniFi API (protocolFilter.type == "PRESET", preset.name == "TCP_UDP").
+    - name: "Family Allow AirPlay"
+      action: allow
+      source: Family
+      destination: IOT
+      protocol: tcp_udp
+      destination_port: "6001,6002,7000,7100"
+
+    # ------------------------------------------------------------------
+    # Kids zone — same service access as Family, separate VLAN
+    # ------------------------------------------------------------------
+
+    - name: "Kids Allow Plex"
+      action: allow
+      source: Kids
+      destination: Server
+      protocol: tcp
+      destination_port: "32400"
+
+    - name: "Kids Allow Plex Discovery"
+      action: allow
+      source: Kids
+      destination: Server
+      protocol: udp
+      destination_port: "32410,32412,32413,32414"
+
+    - name: "Kids Allow Printing"
+      action: allow
+      source: Kids
+      destination: Server
+      protocol: tcp
+      destination_port: "515,631,9100"
+
+    - name: "Kids Allow AirPlay"
+      action: allow
+      source: Kids
+      destination: IOT
+      protocol: tcp_udp
+      destination_port: "6001,6002,7000,7100"
+
+    # ------------------------------------------------------------------
+    # IOT zone — Plex clients (Roku, Apple TV) need to reach the server
+    # ------------------------------------------------------------------
+
+    - name: "IOT Allow Plex"
+      action: allow
+      source: IOT
+      destination: Server
+      protocol: tcp
+      destination_port: "32400"
+
+    - name: "IOT Allow Plex Discovery"
+      action: allow
+      source: IOT
+      destination: Server
+      protocol: udp
+      destination_port: "32410,32412,32413,32414"
+
+# Resources that should NOT exist on the UDM.
+# If present, they will be deleted. If already absent, no action taken.
+absent:
+  policies:
+    - "Admin Allow All to 11805"  # replaced by "Admin Allow All to Rental" after zone rename
