@@ -206,6 +206,15 @@ policies:
       destination: IOT
       protocol: all
 
+# Port forwarding rules (WAN DNAT).
+# Managed via the legacy REST API at /api/s/default/rest/portforward.
+port_forwarding:
+  - name: "Plex Remote Access"
+    protocol: tcp
+    wan_port: "32400"
+    forward_ip: "192.168.2.3"
+    forward_port: "32400"
+
 # Resources that should NOT exist on the UDM.
 # If present, they will be deleted. If already absent, no action taken.
 absent:

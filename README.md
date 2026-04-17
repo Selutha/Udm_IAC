@@ -19,10 +19,10 @@ Python handles diffing and playbook generation. Ansible (via the official
 - Python 3.12+
 - Ansible with the `ubiquiti.unifi_api` collection installed
 - A UI API key generated on the UDM Pro (Settings > API)
-- A `.env` file in the repo root:
+- A `.env` file in the wrapper directory (parent of the repo) or repo root:
   ```bash
-  cp .env.example .env
-  # edit .env with your API key
+  cp .env.example ../.env   # wrapper layout (preferred)
+  # edit ../.env with your API key
   ```
 
 ### Install dependencies
@@ -34,7 +34,7 @@ ansible-galaxy collection install ubiquiti.unifi_api
 
 ## Usage
 
-All commands are run from the `iac/` directory.
+All commands are run from the `src/` directory (the repo root).
 
 ```bash
 # See what would change (default subcommand)
@@ -144,6 +144,31 @@ policies:
 | `enabled` | bool | `true` | Whether the policy is active. |
 | `allow_return_traffic` | bool | `true` | Create matching return-traffic rule. |
 
+### `port_forwarding` — WAN port forwards
+
+List of DNAT rules forwarding traffic from WAN to internal hosts. Managed
+via the legacy REST API (`/api/s/default/rest/portforward`), not the
+integration v1 API.
+
+```yaml
+port_forwarding:
+  - name: "Plex Remote Access"
+    protocol: tcp
+    wan_port: "32400"
+    forward_ip: "192.168.2.3"
+    forward_port: "32400"
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `name` | string | required | Rule name (must be unique). Used to match against existing rules. |
+| `protocol` | string | `"tcp"` | `"tcp"`, `"udp"`, or `"tcp_udp"`. |
+| `wan_port` | string | required | External port. Single (`"443"`) or range (`"8080:8090"`). |
+| `forward_ip` | string | required | Internal destination IP address. |
+| `forward_port` | string | required | Internal destination port. |
+| `enabled` | bool | `true` | Whether the rule is active. |
+| `interface` | string | `"wan"` | WAN interface: `"wan"`, `"wan2"`, or `"both"`. |
+
 ### `absent` — resources to delete
 
 Explicitly mark resources that should not exist. If present on the UDM,
@@ -155,10 +180,12 @@ absent:
     - "OldTestZone"
   policies:
     - "Old Duplicate Policy"
+  port_forwards:
+    - "Old Port Forward"
 ```
 
 System zones cannot be listed here (will error). Only USER_DEFINED
-policies are matched.
+policies and port forwards are matched.
 
 ## Safety Checks
 
@@ -188,15 +215,18 @@ The generated Ansible playbook orders operations for safety:
 ## File Layout
 
 ```
-iac/
-  desired.yml             # Source of truth
-  reconcile.py            # CLI entry point
-  api_client.py           # UDM API v1 client (API-key auth)
-  pull_state.py           # Fetch + normalize current state
-  diff_engine.py          # Desired vs actual comparison
-  generate_playbook.py    # Changeset -> Ansible playbook
-  generated/              # Output playbooks (one per plan run)
-  plans/completed/        # Archived design plans
+udm_iac/                    # Wrapper dir (Claude Code cwd)
+  .env                      # API credentials (NOT in repo)
+  CLAUDE.md                 # Claude Code project instructions (NOT in repo)
+  context/                  # Reference material, notes
+  src/                      # Git repo root
+    desired.yml             # Source of truth
+    reconcile.py            # CLI entry point
+    api_client.py           # UDM API v1 client (API-key auth)
+    pull_state.py           # Fetch + normalize current state
+    diff_engine.py          # Desired vs actual comparison
+    generate_playbook.py    # Changeset -> Ansible playbook
+    generated/              # Output playbooks (one per plan run)
 ```
 
 ## Limitations
