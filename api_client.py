@@ -1,5 +1,6 @@
 """UDM Pro v1 Network API client using API-key authentication."""
 
+import functools
 import os
 import requests
 import urllib3
@@ -7,7 +8,15 @@ import urllib3
 # Suppress insecure HTTPS warnings (self-signed cert on UDM)
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-_DEFAULT_ENV_PATH = os.path.join(os.path.dirname(__file__), ".env")
+_REPO_DIR = os.path.dirname(os.path.abspath(__file__))
+_WRAPPER_DIR = os.path.dirname(_REPO_DIR)
+
+# Look for .env in the wrapper dir first (standard layout), then repo root
+_DEFAULT_ENV_PATH = (
+    os.path.join(_WRAPPER_DIR, ".env")
+    if os.path.exists(os.path.join(_WRAPPER_DIR, ".env"))
+    else os.path.join(_REPO_DIR, ".env")
+)
 
 # Path prefix shared by all integration v1 endpoints
 _API_ROOT = "/proxy/network/integration/v1"
@@ -69,6 +78,9 @@ class UDMApiClient:
             "Content-Type": "application/json",
             "Accept": "application/json",
         })
+        # Default 30s timeout on every request — a hung UDM should fail fast,
+        # not block the reconciler indefinitely.
+        self._session.request = functools.partial(self._session.request, timeout=30)
 
     # ------------------------------------------------------------------
     # Site-ID discovery
@@ -99,6 +111,12 @@ class UDMApiClient:
 
         return f"{self._host}{_API_ROOT}/sites/{self._site_id}"
 
+    @property
+    def site_id(self) -> str:
+        """Return the resolved site UUID, auto-discovering on first access."""
+        self._resolve_site_base()
+        return self._site_id
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -117,9 +135,12 @@ class UDMApiClient:
         resp.raise_for_status()
         return resp.json() if resp.text else {}
 
-    def _get_site(self, path):
-        """GET a site-scoped path, auto-paginating if needed."""
-        url = self._site_url(path)
+    # Hard cap on pagination: 50 pages * 200 items = 10K items, far more than
+    # any UDM list. Protects against a server returning a bad totalCount.
+    _MAX_PAGES = 50
+
+    def _paginate(self, url):
+        """GET a list endpoint, auto-paginating up to _MAX_PAGES."""
         body = self._get_raw(url, params={"limit": 200})
 
         if not isinstance(body, dict) or "data" not in body:
@@ -128,34 +149,29 @@ class UDMApiClient:
         data = body["data"]
         total = body.get("totalCount", len(data))
 
-        while len(data) < total:
+        for _ in range(self._MAX_PAGES):
+            if len(data) >= total:
+                break
             body = self._get_raw(url, params={"limit": 200, "offset": len(data)})
             page = body.get("data", [])
             if not page:
                 break
             data.extend(page)
+        else:
+            raise RuntimeError(
+                f"Pagination exceeded {self._MAX_PAGES} pages for {url} "
+                f"(got {len(data)} items, totalCount={total})"
+            )
 
         return data
+
+    def _get_site(self, path):
+        """GET a site-scoped path, auto-paginating if needed."""
+        return self._paginate(self._site_url(path))
 
     def _get_root(self, path):
         """GET a root-level path (not site-scoped)."""
-        url = self._root_url(path)
-        body = self._get_raw(url, params={"limit": 200})
-
-        if not isinstance(body, dict) or "data" not in body:
-            return body
-
-        data = body["data"]
-        total = body.get("totalCount", len(data))
-
-        while len(data) < total:
-            body = self._get_raw(url, params={"limit": 200, "offset": len(data)})
-            page = body.get("data", [])
-            if not page:
-                break
-            data.extend(page)
-
-        return data
+        return self._paginate(self._root_url(path))
 
     def _post(self, path, data):
         resp = self._session.post(self._site_url(path), json=data)
@@ -277,6 +293,59 @@ class UDMApiClient:
     def delete_network(self, network_id) -> None:
         self._delete(f"networks/{network_id}")
 
+    # ------------------------------------------------------------------
+    # Legacy REST API — port forwarding
+    # ------------------------------------------------------------------
+    # Port forwarding is not exposed on the integration v1 API.  It lives
+    # on the older REST API at /proxy/network/api/s/{site}/rest/portforward.
+    # The same X-API-KEY header works for auth.  Response format differs:
+    #   {"meta": {"rc": "ok"}, "data": [...]}
+
+    def _legacy_url(self, path: str) -> str:
+        """Build a URL under the legacy REST API (site = 'default')."""
+        return f"{self._host}/proxy/network/api/s/default/rest/{path.lstrip('/')}"
+
+    def _get_legacy(self, path: str) -> list[dict]:
+        """GET a legacy REST path and return the data array."""
+        url = self._legacy_url(path)
+        resp = self._session.get(url)
+        resp.raise_for_status()
+        body = resp.json() if resp.text else {}
+        return body.get("data", [])
+
+    def _post_legacy(self, path: str, data: dict) -> dict:
+        url = self._legacy_url(path)
+        resp = self._session.post(url, json=data)
+        resp.raise_for_status()
+        body = resp.json() if resp.text else {}
+        items = body.get("data", [])
+        return items[0] if items else body
+
+    def _put_legacy(self, path: str, data: dict) -> dict:
+        url = self._legacy_url(path)
+        resp = self._session.put(url, json=data)
+        resp.raise_for_status()
+        body = resp.json() if resp.text else {}
+        items = body.get("data", [])
+        return items[0] if items else body
+
+    def _delete_legacy(self, path: str) -> None:
+        url = self._legacy_url(path)
+        resp = self._session.delete(url)
+        resp.raise_for_status()
+
+    def list_port_forwards(self) -> list[dict]:
+        return self._get_legacy("portforward")
+
+    def create_port_forward(self, data: dict) -> dict:
+        return self._post_legacy("portforward", data)
+
+    def update_port_forward(self, pfwd_id: str, data: dict) -> dict:
+        return self._put_legacy(f"portforward/{pfwd_id}", data)
+
+    def delete_port_forward(self, pfwd_id: str) -> None:
+        self._delete_legacy(f"portforward/{pfwd_id}")
+
 
 # ----------------------------------------------------------------------
 # Smoke test — python api_client.py
@@ -305,7 +374,11 @@ if __name__ == "__main__":
     zones = client.list_zones()
     policies = client.list_policies()
     networks = client.list_networks()
+    port_forwards = client.list_port_forwards()
 
     print(f"Zones:    {len(zones)}")
     print(f"Policies: {len(policies)}")
     print(f"Networks: {len(networks)}")
+    print(f"Port Fwd: {len(port_forwards)}")
+    for pf in port_forwards:
+        print(f"  {pf.get('name', '?')}: {pf.get('proto')}/{pf.get('dst_port')} -> {pf.get('fwd')}:{pf.get('fwd_port')}")

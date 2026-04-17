@@ -111,6 +111,23 @@ def _print_changeset(cs: Changeset, current: CurrentState | None = None) -> None
         for p in cs.policies_to_delete:
             print(_c(_RED, f"  - {p.name}") + f"  (id={p.policy_id})")
 
+    if cs.pf_to_create:
+        print(f"\nPort forwards to CREATE ({len(cs.pf_to_create)}):")
+        for pf in cs.pf_to_create:
+            d = pf.data
+            print(_c(_GREEN, f"  + {pf.name}") + f"  {d.get('proto')}/{d.get('dst_port')} -> {d.get('fwd')}:{d.get('fwd_port')}")
+
+    if cs.pf_to_update:
+        print(f"\nPort forwards to UPDATE ({len(cs.pf_to_update)}):")
+        for pf in cs.pf_to_update:
+            d = pf.data
+            print(_c(_YELLOW, f"  ~ {pf.name}") + f"  (id={pf.pfwd_id})  {d.get('proto')}/{d.get('dst_port')} -> {d.get('fwd')}:{d.get('fwd_port')}")
+
+    if cs.pf_to_delete:
+        print(f"\nPort forwards to DELETE ({len(cs.pf_to_delete)}):")
+        for pf in cs.pf_to_delete:
+            print(_c(_RED, f"  - {pf.name}") + f"  (id={pf.pfwd_id})")
+
     if cs.needs_reorder:
         ready = [e for e in cs.reorder_entries if not e.has_pending_creates]
         pending = [e for e in cs.reorder_entries if e.has_pending_creates]
@@ -141,6 +158,12 @@ def _print_change_summary(cs: Changeset) -> None:
         lines.append(_c(_YELLOW, f"~{len(cs.policies_to_update)} policy(s)"))
     if cs.policies_to_delete:
         lines.append(_c(_RED, f"-{len(cs.policies_to_delete)} policy(s)"))
+    if cs.pf_to_create:
+        lines.append(_c(_GREEN, f"+{len(cs.pf_to_create)} port fwd(s)"))
+    if cs.pf_to_update:
+        lines.append(_c(_YELLOW, f"~{len(cs.pf_to_update)} port fwd(s)"))
+    if cs.pf_to_delete:
+        lines.append(_c(_RED, f"-{len(cs.pf_to_delete)} port fwd(s)"))
     if cs.needs_reorder:
         ready = sum(1 for e in cs.reorder_entries if not e.has_pending_creates)
         pending = sum(1 for e in cs.reorder_entries if e.has_pending_creates)
@@ -184,6 +207,14 @@ def _print_current_state(state: CurrentState) -> None:
     print(f"  TOTAL: {len(state.policies)}")
 
     print(f"\nNetworks: {len(state.networks)}")
+
+    print(f"\nPort forwards ({len(state.port_forwards)}):")
+    if state.port_forwards:
+        for name, pf in sorted(state.port_forwards.items()):
+            status = "enabled" if pf.enabled else "disabled"
+            print(f"  {pf.name}: {pf.protocol}/{pf.wan_port} -> {pf.forward_ip}:{pf.forward_port}  [{status}]")
+    else:
+        print("  (none)")
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +265,7 @@ def cmd_plan(args) -> int:
 
     print("Pulling current state...")
     current = pull_current_state(client)
-    site_id = client._site_id  # resolved UUID after pull_current_state
+    site_id = client.site_id  # resolved UUID (property triggers discovery if needed)
 
     print(f"Parsing {args.config} ...")
     desired = parse_desired(args.config)
@@ -242,7 +273,7 @@ def cmd_plan(args) -> int:
     print("Computing diff...")
     changeset = compute_diff(desired, current)
 
-    issues = safety_check(changeset, desired)
+    issues = safety_check(changeset, desired, current)
     if issues:
         print("\nSafety check:")
         for issue in issues:
@@ -270,7 +301,10 @@ def cmd_plan(args) -> int:
     script_dir = os.path.dirname(os.path.abspath(__file__))
     output_path = os.path.join(script_dir, "generated", f"execution_{timestamp}.yml")
 
-    playbook_path = generate_playbook(changeset, site_id, host, output_path)
+    playbook_path = generate_playbook(
+        changeset, site_id, host, output_path,
+        admin_zone_id=current.zone_ids.get("Admin"),
+    )
     print(f"\nPlaybook written: {_c(_BOLD, playbook_path)}")
     print("Run `reconcile.py apply` to execute it.")
     return 0
@@ -288,7 +322,7 @@ def cmd_diff(args) -> int:
     print("Computing diff...")
     changeset = compute_diff(desired, current)
 
-    issues = safety_check(changeset, desired)
+    issues = safety_check(changeset, desired, current)
     if issues:
         print("\nSafety check:")
         for issue in issues:

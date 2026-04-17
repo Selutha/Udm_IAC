@@ -1,0 +1,4 @@
+ansible-core==2.20.4
+PyYAML==6.0.3
+requests==2.33.1
+urllib3==2.6.3

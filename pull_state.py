@@ -42,9 +42,22 @@ class PolicyState:
 
 
 @dataclass
+class PortForwardState:
+    name: str
+    id: str
+    enabled: bool
+    protocol: str           # "tcp", "udp", or "tcp_udp"
+    wan_port: str           # external port (string — can be range "8080:8090")
+    forward_ip: str         # internal destination IP
+    forward_port: str       # internal destination port
+    interface: str           # "wan", "wan2", or "both"
+
+
+@dataclass
 class CurrentState:
     zones: dict[str, ZoneState]           # zone name -> ZoneState
     policies: list[PolicyState]           # ALL policies (caller filters by origin)
+    port_forwards: dict[str, PortForwardState]  # name -> PortForwardState
     networks: dict[str, str]              # network name -> network id
     zone_ids: dict[str, str]              # zone name -> zone id
     network_ids_to_names: dict[str, str]  # network id -> network name
@@ -111,7 +124,7 @@ def _normalize_policy(raw: dict, zone_ids_to_names: dict[str, str]) -> PolicySta
         protocol=_normalize_protocol(ip_scope),
         destination_ports=_normalize_ports(dest_block),
         enabled=raw.get("enabled", True),
-        allow_return_traffic=action_block.get("allowReturnTraffic", False),
+        allow_return_traffic=action_block.get("allowReturnTraffic", True),
         index=raw.get("index", 0),
         origin=metadata.get("origin", ""),
     )
@@ -177,9 +190,27 @@ def pull_current_state(client: UDMApiClient) -> CurrentState:
     # Sort by index so callers get a deterministic ordering
     policies.sort(key=lambda p: p.index)
 
+    # --- Port Forwards ------------------------------------------------------
+    raw_port_forwards = client.list_port_forwards()
+
+    port_forwards: dict[str, PortForwardState] = {}
+    for pf in raw_port_forwards:
+        name = pf.get("name", "")
+        port_forwards[name] = PortForwardState(
+            name=name,
+            id=pf.get("_id", ""),
+            enabled=pf.get("enabled", True),
+            protocol=pf.get("proto", "tcp"),
+            wan_port=str(pf.get("dst_port", "")),
+            forward_ip=pf.get("fwd", ""),
+            forward_port=str(pf.get("fwd_port", "")),
+            interface=pf.get("pfwd_interface", "wan"),
+        )
+
     return CurrentState(
         zones=zones,
         policies=policies,
+        port_forwards=port_forwards,
         networks=networks,
         zone_ids=zone_ids,
         network_ids_to_names=network_ids_to_names,
@@ -233,3 +264,9 @@ if __name__ == "__main__":
     print(f"  TOTAL: {len(state.policies)}")
 
     print(f"\nNetworks: {len(state.networks)}")
+
+    # --- Port forward summary -----------------------------------------------
+    print(f"\nPort forwards ({len(state.port_forwards)}):")
+    for name, pf in sorted(state.port_forwards.items()):
+        status = "enabled" if pf.enabled else "disabled"
+        print(f"  {pf.name}: {pf.protocol}/{pf.wan_port} -> {pf.forward_ip}:{pf.forward_port}  [{status}]")

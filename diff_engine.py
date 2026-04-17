@@ -43,13 +43,26 @@ class DesiredPolicy:
 
 
 @dataclass
+class DesiredPortForward:
+    name: str
+    protocol: str           # "tcp", "udp", or "tcp_udp"
+    wan_port: str           # external port (string — supports ranges like "8080:8090")
+    forward_ip: str         # internal destination IP
+    forward_port: str       # internal destination port
+    enabled: bool = True
+    interface: str = "wan"  # "wan", "wan2", or "both"
+
+
+@dataclass
 class DesiredState:
     zones: dict[str, DesiredZone]   # zone name -> DesiredZone
     policies: list[DesiredPolicy]   # in desired evaluation order
+    port_forwards: dict[str, DesiredPortForward]  # name -> DesiredPortForward
     index_base: int
     index_step: int
     absent_zones: list[str] = field(default_factory=list)      # zone names to delete
     absent_policies: list[str] = field(default_factory=list)    # policy names to delete
+    absent_port_forwards: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -83,6 +96,14 @@ class ReorderEntry:
 
 
 @dataclass
+class PortForwardChange:
+    name: str
+    pfwd_id: str | None     # None for creates
+    action: str             # "create", "update", "delete"
+    data: dict              # full legacy API payload for create/update; {} for delete
+
+
+@dataclass
 class Changeset:
     zones_to_create: list[ZoneChange] = field(default_factory=list)
     zones_to_update: list[ZoneChange] = field(default_factory=list)
@@ -90,6 +111,9 @@ class Changeset:
     policies_to_create: list[PolicyChange] = field(default_factory=list)
     policies_to_update: list[PolicyChange] = field(default_factory=list)
     policies_to_delete: list[PolicyChange] = field(default_factory=list)
+    pf_to_create: list[PortForwardChange] = field(default_factory=list)
+    pf_to_update: list[PortForwardChange] = field(default_factory=list)
+    pf_to_delete: list[PortForwardChange] = field(default_factory=list)
     needs_reorder: bool = False
     reorder_entries: list[ReorderEntry] = field(default_factory=list)
 
@@ -102,6 +126,9 @@ class Changeset:
             and not self.policies_to_create
             and not self.policies_to_update
             and not self.policies_to_delete
+            and not self.pf_to_create
+            and not self.pf_to_update
+            and not self.pf_to_delete
             and not self.needs_reorder
         )
 
@@ -153,17 +180,34 @@ def parse_desired(yaml_path: str) -> DesiredState:
             allow_return_traffic=bool(rule.get("allow_return_traffic", True)),
         ))
 
+    # --- Port Forwarding -------------------------------------------------------
+    port_forwards: dict[str, DesiredPortForward] = {}
+    for rule in (raw.get("port_forwarding") or []):
+        name = str(rule["name"])
+        port_forwards[name] = DesiredPortForward(
+            name=name,
+            protocol=str(rule.get("protocol", "tcp")).lower(),
+            wan_port=str(rule["wan_port"]),
+            forward_ip=str(rule["forward_ip"]),
+            forward_port=str(rule["forward_port"]),
+            enabled=bool(rule.get("enabled", True)),
+            interface=str(rule.get("interface", "wan")).lower(),
+        )
+
     absent_section = raw.get("absent") or {}
     absent_zones = [str(z) for z in (absent_section.get("zones") or [])]
     absent_policies = [str(p) for p in (absent_section.get("policies") or [])]
+    absent_port_forwards = [str(p) for p in (absent_section.get("port_forwards") or [])]
 
     return DesiredState(
         zones=zones,
         policies=policies,
+        port_forwards=port_forwards,
         index_base=index_base,
         index_step=index_step,
         absent_zones=absent_zones,
         absent_policies=absent_policies,
+        absent_port_forwards=absent_port_forwards,
     )
 
 
@@ -249,9 +293,35 @@ def _build_zone_payload(dz: DesiredZone, current: CurrentState) -> dict:
     return {"name": dz.name, "networkIds": network_ids}
 
 
+def _build_port_forward_payload(dpf: DesiredPortForward) -> dict:
+    """Construct the legacy REST API payload for a port forward."""
+    return {
+        "name": dpf.name,
+        "enabled": dpf.enabled,
+        "proto": dpf.protocol,
+        "dst_port": dpf.wan_port,
+        "fwd": dpf.forward_ip,
+        "fwd_port": dpf.forward_port,
+        "pfwd_interface": dpf.interface,
+        "log": False,
+    }
+
+
 # ---------------------------------------------------------------------------
-# Policy field comparison
+# Field comparison helpers
 # ---------------------------------------------------------------------------
+
+def _port_forward_matches(dpf: DesiredPortForward, cpf) -> bool:
+    """Return True if desired and current port forward have identical fields."""
+    return (
+        dpf.protocol == cpf.protocol
+        and dpf.wan_port == cpf.wan_port
+        and dpf.forward_ip == cpf.forward_ip
+        and dpf.forward_port == cpf.forward_port
+        and dpf.enabled == cpf.enabled
+        and dpf.interface == cpf.interface
+    )
+
 
 def _policy_matches(dp: DesiredPolicy, cp) -> bool:
     """Return True if the desired and current policy have identical fields."""
@@ -433,6 +503,52 @@ def compute_diff(desired: DesiredState, current: CurrentState) -> Changeset:
                 has_pending_creates=has_creates,
             ))
 
+    # -----------------------------------------------------------------------
+    # Port forward diff
+    # -----------------------------------------------------------------------
+    desired_pf_names: set[str] = set(desired.port_forwards.keys())
+
+    for name, dpf in desired.port_forwards.items():
+        if name not in current.port_forwards:
+            cs.pf_to_create.append(PortForwardChange(
+                name=name,
+                pfwd_id=None,
+                action="create",
+                data=_build_port_forward_payload(dpf),
+            ))
+        else:
+            cpf = current.port_forwards[name]
+            if not _port_forward_matches(dpf, cpf):
+                cs.pf_to_update.append(PortForwardChange(
+                    name=name,
+                    pfwd_id=cpf.id,
+                    action="update",
+                    data=_build_port_forward_payload(dpf),
+                ))
+
+    # Current port forwards not in desired → delete
+    for name, cpf in current.port_forwards.items():
+        if name not in desired_pf_names:
+            cs.pf_to_delete.append(PortForwardChange(
+                name=name,
+                pfwd_id=cpf.id,
+                action="delete",
+                data={},
+            ))
+
+    # Absent port forwards — explicitly declared for deletion
+    existing_pf_deletes: set[str] = {p.name for p in cs.pf_to_delete}
+    for name in desired.absent_port_forwards:
+        if name not in current.port_forwards or name in existing_pf_deletes:
+            continue
+        cpf = current.port_forwards[name]
+        cs.pf_to_delete.append(PortForwardChange(
+            name=name,
+            pfwd_id=cpf.id,
+            action="delete",
+            data={},
+        ))
+
     return cs
 
 
@@ -440,7 +556,11 @@ def compute_diff(desired: DesiredState, current: CurrentState) -> Changeset:
 # Safety checks
 # ---------------------------------------------------------------------------
 
-def safety_check(changeset: Changeset, desired: DesiredState) -> list[str]:
+def safety_check(
+    changeset: Changeset,
+    desired: DesiredState,
+    current: CurrentState | None = None,
+) -> list[str]:
     """Validate a changeset for obviously dangerous operations.
 
     Returns a list of warning/error strings.  An empty list means the
@@ -448,6 +568,9 @@ def safety_check(changeset: Changeset, desired: DesiredState) -> list[str]:
 
     Error strings are prefixed "ERROR:" and must block execution.
     Warning strings are prefixed "WARNING:" and should prompt for --force.
+
+    `current` is required for the post-changeset lockout check; passing None
+    skips that specific check (kept optional for backward compat).
     """
     issues: list[str] = []
 
@@ -456,21 +579,39 @@ def safety_check(changeset: Changeset, desired: DesiredState) -> list[str]:
     if admin_deletes:
         issues.append("ERROR: Admin zone is in the delete list — this would cause a lockout.")
 
-    # 2. All Admin allow-all policies being deleted simultaneously
-    #    Identify Admin allow-all policies in desired state so we know the
-    #    universe of names to watch.  If every one of them is in the delete
-    #    list, that's a lockout risk.
-    admin_allow_all_desired = {
-        dp.name
-        for dp in desired.policies
-        if dp.source_zone == "Admin" and dp.action == "allow" and not dp.destination_ports
-    }
-    deleting_policy_names = {c.name for c in changeset.policies_to_delete}
-    if admin_allow_all_desired and admin_allow_all_desired.issubset(deleting_policy_names):
-        issues.append(
-            "ERROR: All Admin allow-all policies are being deleted simultaneously — "
-            "this would prevent Admin zone from reaching any other zone."
-        )
+    # 2. Admin allow-all lockout: at least one Admin allow-all policy must
+    #    EXIST after the changeset is applied. Look at the post-changeset
+    #    universe (current minus deletes plus creates), not just desired —
+    #    the old check missed the case where current has admin allow-all
+    #    rules that aren't in desired (so they get implicitly deleted).
+    if current is not None:
+        admin_zone_id = current.zone_ids.get("Admin", "")
+        deleting_names = {c.name for c in changeset.policies_to_delete}
+
+        current_admin_allow_all = {
+            cp.name for cp in current.policies
+            if cp.origin == "USER_DEFINED"
+            and cp.source_zone == "Admin"
+            and cp.action == "allow"
+            and not cp.destination_ports
+        }
+        surviving_current = current_admin_allow_all - deleting_names
+        new_admin_allow_all = {
+            pc.name for pc in changeset.policies_to_create
+            if admin_zone_id
+            and pc.data.get("source", {}).get("zoneId") == admin_zone_id
+            and pc.data.get("action", {}).get("type") == "ALLOW"
+            and not pc.data.get("destination", {}).get("trafficFilter")
+        }
+        post_changeset_admin_allow_all = surviving_current | new_admin_allow_all
+
+        if current_admin_allow_all and not post_changeset_admin_allow_all:
+            removed = sorted(current_admin_allow_all)
+            issues.append(
+                f"ERROR: All Admin allow-all policies will be removed "
+                f"(removing: {removed}) — this would prevent the Admin zone "
+                f"from reaching any other zone."
+            )
 
     # 3. Large-scale policy deletes
     if len(changeset.policies_to_delete) > 5:
@@ -557,7 +698,7 @@ if __name__ == "__main__":
     desired = parse_desired(desired_yml)
     changeset = compute_diff(desired, current)
 
-    issues = safety_check(changeset, desired)
+    issues = safety_check(changeset, desired, current)
     if issues:
         print("\nSafety check issues:")
         for issue in issues:

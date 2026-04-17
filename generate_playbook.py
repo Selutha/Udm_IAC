@@ -148,6 +148,60 @@ def _policy_delete_task(change) -> dict:
     }
 
 
+def _pf_create_task(change, host: str) -> dict:
+    """POST to legacy REST API for port forwarding."""
+    return {
+        "name": f"Create port forward: {change.name}",
+        "ansible.builtin.uri": {
+            "url": f"{host}/proxy/network/api/s/default/rest/portforward",
+            "method": "POST",
+            "headers": {
+                "X-API-KEY": "{{ lookup('env', 'UI_API_KEY') }}",
+                "Content-Type": "application/json",
+            },
+            "body_format": "json",
+            "body": change.data,
+            "validate_certs": False,
+            "status_code": [200, 201],
+        },
+    }
+
+
+def _pf_update_task(change, host: str) -> dict:
+    """PUT to legacy REST API for port forwarding."""
+    return {
+        "name": f"Update port forward: {change.name}",
+        "ansible.builtin.uri": {
+            "url": f"{host}/proxy/network/api/s/default/rest/portforward/{change.pfwd_id}",
+            "method": "PUT",
+            "headers": {
+                "X-API-KEY": "{{ lookup('env', 'UI_API_KEY') }}",
+                "Content-Type": "application/json",
+            },
+            "body_format": "json",
+            "body": change.data,
+            "validate_certs": False,
+            "status_code": [200],
+        },
+    }
+
+
+def _pf_delete_task(change, host: str) -> dict:
+    """DELETE from legacy REST API for port forwarding."""
+    return {
+        "name": f"Delete port forward: {change.name}",
+        "ansible.builtin.uri": {
+            "url": f"{host}/proxy/network/api/s/default/rest/portforward/{change.pfwd_id}",
+            "method": "DELETE",
+            "headers": {
+                "X-API-KEY": "{{ lookup('env', 'UI_API_KEY') }}",
+            },
+            "validate_certs": False,
+            "status_code": [200, 204],
+        },
+    }
+
+
 def _policy_reorder_task(entry) -> dict:
     """PUT firewall/policies/ordering for a zone pair.
 
@@ -179,7 +233,13 @@ def _policy_reorder_task(entry) -> dict:
 # Core generator
 # ---------------------------------------------------------------------------
 
-def generate_playbook(changeset: Changeset, site_id: str, host: str, output_path: str) -> str:
+def generate_playbook(
+    changeset: Changeset,
+    site_id: str,
+    host: str,
+    output_path: str,
+    admin_zone_id: str | None = None,
+) -> str:
     """Generate an Ansible playbook from a changeset.
 
     Task ordering (safe by design):
@@ -191,6 +251,11 @@ def generate_playbook(changeset: Changeset, site_id: str, host: str, output_path
       6. Policy deletes        — reverse order (least-permissive first)
       7. Zone deletes          — reverse order
       8. Policy reorder        — or a TODO comment if needs_reorder is True
+      9. Port forward changes  — create, update, delete (legacy REST API)
+
+    `admin_zone_id` enables a deterministic Admin-allow-all detection in
+    Phase 2; when omitted, no policies are reclassified as Admin-safety
+    (they all flow through Phase 4 instead).
 
     Returns the path to the generated playbook file.
     """
@@ -214,11 +279,10 @@ def generate_playbook(changeset: Changeset, site_id: str, host: str, output_path
     admin_creates = [
         c for c in changeset.policies_to_create
         if (
-            c.data.get("source", {}).get("zoneId") is not None
+            admin_zone_id is not None
+            and c.data.get("source", {}).get("zoneId") == admin_zone_id
             and c.data.get("action", {}).get("type") == "ALLOW"
             and not c.data.get("destination", {}).get("trafficFilter")
-            # name heuristic as a secondary guard
-            and "admin" in c.name.lower() and "allow" in c.name.lower()
         )
     ]
     remaining_creates = [
@@ -294,6 +358,23 @@ def generate_playbook(changeset: Changeset, site_id: str, host: str, output_path
                 ),
             },
         })
+
+    # ------------------------------------------------------------------
+    # Phase 9: Port forward changes (legacy REST API)
+    # Uses ansible.builtin.uri instead of ubiquiti.unifi_api.network
+    # because port forwarding lives on a different API path.
+    # ------------------------------------------------------------------
+    has_pf_changes = (
+        changeset.pf_to_create or changeset.pf_to_update or changeset.pf_to_delete
+    )
+    if has_pf_changes:
+        tasks.append({"name": "# Phase 9: Port forward changes"})
+    for change in changeset.pf_to_create:
+        tasks.append(_pf_create_task(change, host))
+    for change in changeset.pf_to_update:
+        tasks.append(_pf_update_task(change, host))
+    for change in reversed(changeset.pf_to_delete):
+        tasks.append(_pf_delete_task(change, host))
 
     # ------------------------------------------------------------------
     # Build the full play
