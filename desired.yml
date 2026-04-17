@@ -194,6 +194,18 @@ policies:
       protocol: udp
       destination_port: "32410,32412,32413,32414"
 
+    # ------------------------------------------------------------------
+    # IOT intra-zone — allow devices within the IOT zone to talk to
+    # each other (e.g. Home Assistant on CasaOS ↔ ESP32 devices).
+    # UniFi blocks IOT→IOT by default via system-defined rules.
+    # ------------------------------------------------------------------
+
+    - name: "IOT Allow Intra-Zone"
+      action: allow
+      source: IOT
+      destination: IOT
+      protocol: all
+
 # Resources that should NOT exist on the UDM.
 # If present, they will be deleted. If already absent, no action taken.
 absent:
